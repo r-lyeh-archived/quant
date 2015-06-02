@@ -5,7 +5,8 @@
 #include <math.h>
 #include <stdint.h>
 
-#define QUANT_VERSION "1.0.0" // (2015/05/29) initial revision
+#define QUANT_VERSION "1.0.1" /* (2015/06/02) improved quant precision; fixed rotation bug
+#define QUANT_VERSION "1.0.0" // (2015/05/29) initial revision */
 
 // [usage]
 // - Quantize animations from standard 64-bytes (matrix4x4f) to 12-bytes (uint32_t pos,rot,sca) per bone.
@@ -127,6 +128,12 @@ static float rsqrt( float number ) {
     y  = y * ( threehalfs - ( x2 * y * y ) );   // 3rd iteration, this can be removed
     return y;
 #endif
+}
+
+//
+// Helper: remap floating number in range [min1..max1] to range [min2..max2]
+static float remap( float x, float min1, float max1, float min2, float max2 ) {
+    return ( ( ( x - min1 ) / ( max1 - min1 ) ) * ( max2 - min2 ) ) + min2;
 }
 
 // 
@@ -273,20 +280,33 @@ static void encode101010_quat( uint32_t &out, float a, float b, float c, float d
     // (otherwise, one of them would be largest). So we use the 10 bits to quantize a value in that range, giving us a precision of 0.0014.
     // The quaternions (x, y, z, w) and (-x, -y, -z, -w) represent the same rotation,
     // so I flip the signs so that the largest component is always positive." - Niklas Frykholm / bitsquid.se
+    static const float rmin = -rsqrt(2), rmax = rsqrt(2);
     float aa = a*a, bb = b*b, cc = c*c, dd = d*d;
     /**/ if( aa >= bb && aa >= cc && aa >= dd ) {
+		b = remap( b, rmin, rmax, -1, 1 );
+		c = remap( c, rmin, rmax, -1, 1 );
+		d = remap( d, rmin, rmax, -1, 1 );
         out = a >= 0 ? uint32_t( (0<<30) | (encode10_snorm( b)<<20) | (encode10_snorm( c)<<10) | (encode10_snorm( d)<<0) )
                      : uint32_t( (0<<30) | (encode10_snorm(-b)<<20) | (encode10_snorm(-c)<<10) | (encode10_snorm(-d)<<0) );
     }
     else if( bb >= cc && bb >= dd ) {
+		a = remap( a, rmin, rmax, -1, 1 );
+		c = remap( c, rmin, rmax, -1, 1 );
+		d = remap( d, rmin, rmax, -1, 1 );
         out = b >= 0 ? uint32_t( (1<<30) | (encode10_snorm( a)<<20) | (encode10_snorm( c)<<10) | (encode10_snorm( d)<<0) )
                      : uint32_t( (1<<30) | (encode10_snorm(-a)<<20) | (encode10_snorm(-c)<<10) | (encode10_snorm(-d)<<0) );
     }
     else if( cc >= dd ) {
+		a = remap( a, rmin, rmax, -1, 1 );
+		b = remap( b, rmin, rmax, -1, 1 );
+		d = remap( d, rmin, rmax, -1, 1 );
         out = c >= 0 ? uint32_t( (2<<30) | (encode10_snorm( a)<<20) | (encode10_snorm( b)<<10) | (encode10_snorm( d)<<0) )
                      : uint32_t( (2<<30) | (encode10_snorm(-a)<<20) | (encode10_snorm(-b)<<10) | (encode10_snorm(-d)<<0) );
     }
     else {
+		a = remap( a, rmin, rmax, -1, 1 );
+		b = remap( b, rmin, rmax, -1, 1 );
+		c = remap( c, rmin, rmax, -1, 1 );
         out = d >= 0 ? uint32_t( (3<<30) | (encode10_snorm( a)<<20) | (encode10_snorm( b)<<10) | (encode10_snorm( c)<<0) )
                      : uint32_t( (3<<30) | (encode10_snorm(-a)<<20) | (encode10_snorm(-b)<<10) | (encode10_snorm(-c)<<0) );
     }
@@ -298,26 +318,39 @@ static void encode101010_quat( uint32_t &out, float a, float b, float c, float d
 static void decode101010_quat( float &a, float &b, float &c, float &d, uint32_t in ) {
     // [ref] http://bitsquid.blogspot.com.es/2009/11/bitsquid-low-level-animation-system.html 
     // See encode101010_quat() function above.
+    static const float rmin = -rsqrt(2), rmax = rsqrt(2);
     switch( in >> 30 ) {
         default: case 0:
             b = decode10_snorm( ( in >> 20 ) & 0x3FF );
             c = decode10_snorm( ( in >> 10 ) & 0x3FF );
             d = decode10_snorm( ( in >>  0 ) & 0x3FF );
-            a = 1 / rsqrt( 1 - a * a - b * b - c * c );
+			b = remap( b, -1, 1, rmin, rmax );
+			c = remap( c, -1, 1, rmin, rmax );
+			d = remap( d, -1, 1, rmin, rmax );
+			a = 1 / rsqrt( 1 - b * b - c * c - d * d );
         break; case 1:
             a = decode10_snorm( ( in >> 20 ) & 0x3FF );
             c = decode10_snorm( ( in >> 10 ) & 0x3FF );
             d = decode10_snorm( ( in >>  0 ) & 0x3FF );
-            b = 1 / rsqrt( 1 - a * a - b * b - c * c );
+			a = remap( a, -1, 1, rmin, rmax );
+			c = remap( c, -1, 1, rmin, rmax );
+			d = remap( d, -1, 1, rmin, rmax );
+            b = 1 / rsqrt( 1 - a * a - c * c - d * d );
         break; case 2:
             a = decode10_snorm( ( in >> 20 ) & 0x3FF );
             b = decode10_snorm( ( in >> 10 ) & 0x3FF );
             d = decode10_snorm( ( in >>  0 ) & 0x3FF );
-            c = 1 / rsqrt( 1 - a * a - b * b - c * c );
+			a = remap( a, -1, 1, rmin, rmax );
+			b = remap( b, -1, 1, rmin, rmax );
+			d = remap( d, -1, 1, rmin, rmax );
+            c = 1 / rsqrt( 1 - a * a - b * b - d * d );
         break; case 3:
             a = decode10_snorm( ( in >> 20 ) & 0x3FF );
             b = decode10_snorm( ( in >> 10 ) & 0x3FF );
             c = decode10_snorm( ( in >>  0 ) & 0x3FF );
+			a = remap( a, -1, 1, rmin, rmax );
+			b = remap( b, -1, 1, rmin, rmax );
+			c = remap( c, -1, 1, rmin, rmax );
             d = 1 / rsqrt( 1 - a * a - b * b - c * c );
     }
 }
